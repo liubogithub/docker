@@ -25,6 +25,7 @@ var ErrIncompatibleLabel = fmt.Errorf("Bad SELinux option z and Z can not be use
 // the labels.  The labels returned will include a random MCS String, that is
 // guaranteed to be unique.
 func InitLabels(options []string) (string, string, error) {
+        fmt.Printf("selinux %#v\n", selinux.SelinuxEnabled());
 	if !selinux.SelinuxEnabled() {
 		return "", "", nil
 	}
@@ -52,6 +53,7 @@ func InitLabels(options []string) (string, string, error) {
 		processLabel = pcon.Get()
 		mountLabel = mcon.Get()
 	}
+	fmt.Printf("processLabel %#v mountLabel %#v\n", processLabel, mountLabel)
 	return processLabel, mountLabel, nil
 }
 
