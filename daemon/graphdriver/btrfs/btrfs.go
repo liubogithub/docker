@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"unsafe"
 
+	"github.com/Sirupsen/logrus"
 	"github.com/docker/docker/daemon/graphdriver"
 	"github.com/docker/docker/pkg/idtools"
 	"github.com/docker/docker/pkg/mount"
@@ -41,6 +42,30 @@ func Init(home string, options []string, uidMaps, gidMaps []idtools.IDMap) (grap
 		return nil, graphdriver.ErrPrerequisites
 	}
 
+	// Find out dev name
+	var buf syscall.Stat_t
+	if err := syscall.Stat(home, &buf); err != nil {
+		return nil, fmt.Errorf("Failed to access '%s': %s", home, err)
+	}
+
+	wantedDev := buf.Dev
+	dev := ""
+
+	mounts, err := mount.GetMounts()
+	if err != nil {
+		return nil, err
+	}
+	for _, m := range mounts {
+		if err := syscall.Stat(m.Mountpoint, &buf); err != nil {
+			logrus.Debugf("[btrfs] failed to stat '%s' while scanning for btrfs mount: %v", m.Mountpoint, err)
+			continue
+		}
+
+		if buf.Dev == wantedDev && m.Fstype == "btrfs" {
+			dev = m.Source
+		}
+	}
+
 	rootUID, rootGID, err := idtools.GetRootUIDGID(uidMaps, gidMaps)
 	if err != nil {
 		return nil, err
@@ -55,6 +80,7 @@ func Init(home string, options []string, uidMaps, gidMaps []idtools.IDMap) (grap
 
 	driver := &Driver{
 		home:    home,
+		dev:	 dev,
 		uidMaps: uidMaps,
 		gidMaps: gidMaps,
 	}
@@ -66,6 +92,7 @@ func Init(home string, options []string, uidMaps, gidMaps []idtools.IDMap) (grap
 type Driver struct {
 	//root of the file system
 	home    string
+	dev     string
 	uidMaps []idtools.IDMap
 	gidMaps []idtools.IDMap
 }
@@ -277,11 +304,18 @@ func (d *Driver) Create(id, parent, mountLabel string) error {
 		}
 	}
 
-	return label.Relabel(path.Join(subvolumes, id), mountLabel, false)
+        fmt.Printf("create mountLabel %#v\n", mountLabel)
+//	return label.Relabel(path.Join(subvolumes, id), mountLabel, false)
+	return nil
 }
 
 // Remove the filesystem with given id.
 func (d *Driver) Remove(id string) error {
+	mp := path.Join(d.home, "mnt", id)
+	if err := os.RemoveAll(mp); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+
 	dir := d.subvolumesDirID(id)
 	if _, err := os.Stat(dir); err != nil {
 		return err
@@ -293,6 +327,16 @@ func (d *Driver) Remove(id string) error {
 		return err
 	}
 	return nil
+}
+
+func joinMountOptions(a, b string) string {
+	if a == "" {
+		return b
+	}
+	if b == "" {
+		return a
+	}
+	return a + "," + b
 }
 
 // Get the requested filesystem id.
@@ -307,6 +351,33 @@ func (d *Driver) Get(id, mountLabel string) (string, error) {
 		return "", fmt.Errorf("%s: not a directory", dir)
 	}
 
+        fmt.Printf("|---->Get() mountLabel %#v\n", mountLabel)
+
+	mp := path.Join(d.home, "mnt", id)
+
+	uid, gid, err := idtools.GetRootUIDGID(d.uidMaps, d.gidMaps)
+	if err != nil {
+		return "", err
+	}
+	// Create the target directories if they don't exist
+	if err := idtools.MkdirAllAs(path.Join(d.home, "mnt"), 0755, uid, gid); err != nil && !os.IsExist(err) {
+		return "", err
+	}
+	if err := idtools.MkdirAs(mp, 0755, uid, gid); err != nil && !os.IsExist(err) {
+		return "", err
+	}
+
+	subvol := "subvol=/btrfs/subvolumes/" + id
+	options := ""
+	options = joinMountOptions(options, subvol)
+	options = joinMountOptions(options, label.FormatMountLabel("", mountLabel))
+
+	fmt.Printf("mp %#v mount options %#v\n", mp, options)
+	// Mount the device
+	if err := mount.Mount(d.dev, mp, "btrfs", options); err != nil {
+		return "", fmt.Errorf("btrfs: Error mounting '%s' on '%s': %s", d.dev, mp, err)
+	}
+	
 	return dir, nil
 }
 
@@ -314,6 +385,11 @@ func (d *Driver) Get(id, mountLabel string) (string, error) {
 func (d *Driver) Put(id string) error {
 	// Get() creates no runtime resources (like e.g. mounts)
 	// so this doesn't need to do anything.
+
+	mp := path.Join(d.home, "mnt", id)
+	if err := mount.Unmount(mp); err != nil {
+		return fmt.Errorf("error unmounting to %s: %v", mp, err)
+	}
 	return nil
 }
 
