@@ -7,6 +7,7 @@ package btrfs
 #include <dirent.h>
 #include <btrfs/ioctl.h>
 #include <btrfs/ctree.h>
+#include "helper.h"
 */
 import "C"
 
@@ -42,6 +43,14 @@ func Init(home string, options []string, uidMaps, gidMaps []idtools.IDMap) (grap
 		return nil, graphdriver.ErrPrerequisites
 	}
 
+	rootUID, rootGID, err := idtools.GetRootUIDGID(uidMaps, gidMaps)
+	if err != nil {
+		return nil, err
+	}
+	if err := idtools.MkdirAllAs(home, 0700, rootUID, rootGID); err != nil {
+		return nil, err
+	}
+
 	// Find out dev name
 	var buf syscall.Stat_t
 	if err := syscall.Stat(home, &buf); err != nil {
@@ -64,14 +73,6 @@ func Init(home string, options []string, uidMaps, gidMaps []idtools.IDMap) (grap
 		if buf.Dev == wantedDev && m.Fstype == "btrfs" {
 			dev = m.Source
 		}
-	}
-
-	rootUID, rootGID, err := idtools.GetRootUIDGID(uidMaps, gidMaps)
-	if err != nil {
-		return nil, err
-	}
-	if err := idtools.MkdirAllAs(home, 0700, rootUID, rootGID); err != nil {
-		return nil, err
 	}
 
 	if err := mount.MakePrivate(home); err != nil {
@@ -351,7 +352,26 @@ func (d *Driver) Get(id, mountLabel string) (string, error) {
 		return "", fmt.Errorf("%s: not a directory", dir)
 	}
 
-        fmt.Printf("|---->Get() mountLabel %#v\n", mountLabel)
+	// Get subvolume id for mount options
+	var subid uint64
+	cid := C.CString(id)
+	defer C.free(unsafe.Pointer(cid))
+
+	homedir, err := openDir(d.home)
+	if err != nil {
+		return "", err
+	}
+	defer closeDir(homedir)
+
+	// NOTE: check this return value
+	csubid := C.ulonglong(subid)
+	ret := C.get_subvol_id(C.dirfd(homedir), cid, &csubid)
+	if ret != 0 {
+		return "", fmt.Errorf("%s: failed to get subvolid", dir)
+	}
+	subid = uint64(csubid)
+
+        fmt.Printf("|---->Get() mountLabel %#v subid %#v csubid %#v subid=%#v\n", mountLabel, subid, csubid, fmt.Sprintf("subvolid=%v", subid))
 
 	mp := path.Join(d.home, "mnt", id)
 
@@ -367,7 +387,7 @@ func (d *Driver) Get(id, mountLabel string) (string, error) {
 		return "", err
 	}
 
-	subvol := "subvol=/btrfs/subvolumes/" + id
+	subvol := fmt.Sprintf("subvolid=%v,nosharecache=%v", subid, subid)
 	options := ""
 	options = joinMountOptions(options, subvol)
 	options = joinMountOptions(options, label.FormatMountLabel("", mountLabel))
