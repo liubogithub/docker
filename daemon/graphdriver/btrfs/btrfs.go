@@ -398,7 +398,7 @@ func (d *Driver) Get(id, mountLabel string) (string, error) {
 		return "", fmt.Errorf("btrfs: Error mounting '%s' on '%s': %s", d.dev, mp, err)
 	}
 	
-	return dir, nil
+	return mp, nil
 }
 
 // Put is not implemented for BTRFS as there is no cleanup required for the id.
